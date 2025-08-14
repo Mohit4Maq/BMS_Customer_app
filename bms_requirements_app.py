@@ -243,7 +243,7 @@ if st.session_state.step == 2:
         st.session_state["save_error"] = err
         if ok:
             link = sheet_link()
-            st.success("✅ Saved to Google Sheets.")
+            st.success("✅ Saved to MaqLabs Database, Team will get back to you shortly.")
             #if link:
                 #st.markdown(f"Open your responses here: {link}")
         else:
