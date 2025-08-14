@@ -232,7 +232,7 @@ if st.session_state.step == 2:
     with c1:
         st.button("⬅️ Back", use_container_width=True, on_click=prev_step)
     with c2:
-        submit_clicked = st.button("💾 Submit & Save to Google Sheets", type="primary", use_container_width=True)
+        submit_clicked = st.button("💾 Submit & Save ", type="primary", use_container_width=True)
     with c3:
         download_json_button(st.session_state["data"])
 
@@ -244,8 +244,8 @@ if st.session_state.step == 2:
         if ok:
             link = sheet_link()
             st.success("✅ Saved to Google Sheets.")
-            if link:
-                st.markdown(f"Open your responses here: {link}")
+            #if link:
+                #st.markdown(f"Open your responses here: {link}")
         else:
             st.error(f"❌ Save failed: {err}")
 
