@@ -1,16 +1,68 @@
 
 import streamlit as st
-from datetime import datetime
-from typing import Dict, Any
+import json, datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="BMS Requirements Form", page_icon="🔋", layout="wide")
 
-# ---------- Helpers ----------
+# ===================== Google Sheets Storage =====================
+def get_gs_client():
+    """Build a gspread client from a Service Account JSON stored in st.secrets."""
+    # Expect st.secrets to contain:
+    #   GCP_SERVICE_ACCOUNT (stringified JSON)
+    #   SHEET_ID (the Google Sheets ID)
+    required = ["GCP_SERVICE_ACCOUNT", "SHEET_ID"]
+    for r in required:
+        if r not in st.secrets:
+            st.warning(f"Missing secret: {r}. Add it in Streamlit Cloud → Settings → Secrets.")
+            return None, None
+    svc_json = st.secrets["GCP_SERVICE_ACCOUNT"]
+    try:
+        info = json.loads(svc_json)
+    except Exception as e:
+        st.error(f"GCP_SERVICE_ACCOUNT is not valid JSON: {e}")
+        return None, None
+    creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    client = gspread.authorize(creds)
+    return client, st.secrets["SHEET_ID"]
+
+def append_to_sheet(payload: dict):
+    """Append a new row with timestamp, contact info, and JSON payload to Google Sheets."""
+    client, sheet_id = get_gs_client()
+    if not client:
+        return False, "No Google Sheets client"
+    try:
+        sh = client.open_by_key(sheet_id)
+        ws = sh.sheet1  # use first worksheet
+        ts = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        row = [
+            ts,
+            payload.get("project_name",""),
+            payload.get("company",""),
+            payload.get("contact_email",""),
+            json.dumps(payload, ensure_ascii=False),
+        ]
+        ws.append_row(row, value_input_option="USER_ENTERED")
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def sheet_link():
+    if "SHEET_ID" in st.secrets:
+        sid = st.secrets["SHEET_ID"]
+        return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
+    return None
+
+# ===================== App State & Helpers =====================
 def init_state():
     defaults = {
         "step": 1,
         "data": {},
         "chem_cell_nominal_map": {"NMC": 3.6, "NCA": 3.6, "LFP": 3.2, "LTO": 2.4, "Other": 3.6},
+        "submitted": False,
+        "saved": False,
+        "save_error": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -46,8 +98,8 @@ def required(ok: bool, label: str):
         st.caption(f"❗Please fill **{label}**")
     return ok
 
-def download_json_button(data: Dict[str, Any]):
-    fname = f"BMS_Requirements_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+def download_json_button(data):
+    fname = f"BMS_Requirements_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     st.download_button("⬇️ Download JSON", data=json.dumps(data, indent=2), file_name=fname, mime="application/json")
 
 def header():
@@ -57,10 +109,11 @@ def header():
         st.caption("Two-step, easy form: **Basics** → **Advanced Features**")
     st.divider()
 
+# ===================== UI =====================
 init_state()
 header()
 
-# ---------- Sidebar ----------
+# Sidebar
 with st.sidebar:
     st.markdown("## Progress")
     st.progress(50 if st.session_state.step == 1 else 100, text="Step 1/2" if st.session_state.step == 1 else "Step 2/2")
@@ -78,7 +131,7 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Could not load JSON: {e}")
 
-# ---------- Step 1: Basics ----------
+# Step 1
 if st.session_state.step == 1:
     st.subheader("Step 1 — Basics")
     st.caption("Tell us about the application and pack fundamentals.")
@@ -142,20 +195,17 @@ if st.session_state.step == 1:
     with mid:
         st.button("➡️ Next: Advanced Features", type="primary", use_container_width=True, on_click=next_step, disabled=not req_ok)
 
-# ---------- Step 2: Advanced ----------
+# Step 2
 if st.session_state.step == 2:
     st.subheader("Step 2 — Advanced Features")
     st.caption("Fine-tune algorithms, protections, controls, and serviceability.")
 
-    # Layout in sections
-    st.markdown("##### Algorithms & Balancing")
     a1, a2 = st.columns(2)
     with a1:
         set_kv("soc_method", st.selectbox("SoC Estimation", ["Coulomb Counting", "OCV + Model", "Kalman/UKF", "Neural/Fusion", "Not sure"], index=(["Coulomb Counting","OCV + Model","Kalman/UKF","Neural/Fusion","Not sure"].index(kv("soc_method")) if kv("soc_method") in ["Coulomb Counting","OCV + Model","Kalman/UKF","Neural/Fusion","Not sure"] else 1)))
         set_kv("soh_method", st.selectbox("SoH Estimation", ["Rint/Impedance", "Capacity Fade Tracking", "Data-driven", "Hybrid", "Not sure"], index=(["Rint/Impedance","Capacity Fade Tracking","Data-driven","Hybrid","Not sure"].index(kv("soh_method")) if kv("soh_method") in ["Rint/Impedance","Capacity Fade Tracking","Data-driven","Hybrid","Not sure"] else 2)))
         set_kv("balancing", st.selectbox("Cell Balancing", ["None","Passive (bleed)", "Active (inductive/capacitive)"], index=(["None","Passive (bleed)","Active (inductive/capacitive)"].index(kv("balancing")) if kv("balancing") in ["None","Passive (bleed)","Active (inductive/capacitive)"] else 1)))
         set_kv("balancing_power_w", st.number_input("Balancing power per cell (W)", 0.0, 20.0, float(kv("balancing_power_w", 0.5)), 0.1))
-
     with a2:
         set_kv("logging_rate_hz", st.number_input("Data logging rate (Hz)", 0.0, 1000.0, float(kv("logging_rate_hz", 1.0)), 0.1))
         set_kv("ota_updates", st.checkbox("OTA firmware updates", value=bool(kv("ota_updates", True))))
@@ -173,43 +223,38 @@ if st.session_state.step == 2:
         set_kv("ot_c", st.number_input("Over-temperature (°C)", 20, 120, int(kv("ot_c", 80))))
         set_kv("ut_c", st.number_input("Under-temperature (°C)", -60, 40, int(kv("ut_c", -10))))
 
-    st.markdown("##### Power & HV Controls")
-    h1, h2 = st.columns(2)
-    with h1:
-        set_kv("precharge", st.checkbox("Precharge control", value=bool(kv("precharge", True))))
-        set_kv("contactors", st.multiselect("Contactors", ["Main + / Main -", "Charger", "Heater/AC", "Others"], default=kv("contactors", ["Main + / Main -"])))
-        set_kv("imd_required", st.checkbox("Isolation Monitoring (IMD)", value=bool(kv("imd_required", True))))
-    with h2:
-        set_kv("thermal_mgmt", st.multiselect("Thermal management", ["Fan PWM", "Coolant pump", "PTC heater", "Chiller control"], default=kv("thermal_mgmt", ["Fan PWM"])))
-        set_kv("redundancy", st.selectbox("Redundancy / Diagnostics depth", ["Basic", "Enhanced", "Safety-critical"], index=(["Basic","Enhanced","Safety-critical"].index(kv("redundancy")) if kv("redundancy") in ["Basic","Enhanced","Safety-critical"] else 1)))
-        set_kv("diag_features", st.multiselect("Diagnostics", ["DTCs (ISO 14229)", "Freeze frames", "Self-test", "Blackbox after fault"], default=kv("diag_features", ["DTCs (ISO 14229)"])))
-
-    st.markdown("##### Program & Scale")
-    s1, s2 = st.columns(2)
-    with s1:
-        set_kv("target_hardware", st.selectbox("Preferred IC / AFE (optional)", ["Not specified", "TI BQ76952", "NXP MC33772/33771", "ADI LTC6811/6813", "Other"], index=(["Not specified","TI BQ76952","NXP MC33772/33771","ADI LTC6811/6813","Other"].index(kv("target_hardware")) if kv("target_hardware") in ["Not specified","TI BQ76952","NXP MC33772/33771","ADI LTC6811/6813","Other"] else 0)))
-        set_kv("proto_timeline", st.selectbox("Prototype timeline", ["< 2 months", "2–4 months", "4–6 months", "> 6 months"], index=(["< 2 months","2–4 months","4–6 months","> 6 months"].index(kv("proto_timeline")) if kv("proto_timeline") in ["< 2 months","2–4 months","4–6 months","> 6 months"] else 1)))
-    with s2:
-        set_kv("annual_volume", st.selectbox("Estimated annual volume", ["<100", "100–1k", "1k–10k", "10k–100k", ">100k"], index=(["<100","100–1k","1k–10k","10k–100k",">100k"].index(kv("annual_volume")) if kv("annual_volume") in ["<100","100–1k","1k–10k","10k–100k",">100k"] else 2)))
-        set_kv("budget_band", st.selectbox("Budget band (controller+integration)", ["Undisclosed", "₹ <10L", "₹ 10–50L", "₹ 50L–2Cr", "₹ >2Cr"], index=(["Undisclosed","₹ <10L","₹ 10–50L","₹ 50L–2Cr","₹ >2Cr"].index(kv("budget_band")) if kv("budget_band") in ["Undisclosed","₹ <10L","₹ 10–50L","₹ 50L–2Cr","₹ >2Cr"] else 0)))
-
-    # Navigation
-    cleft, cmid, cright = st.columns([1,2,1])
-    with cleft:
-        st.button("⬅️ Back", use_container_width=True, on_click=prev_step)
-    with cright:
-        st.button("✅ Finish & Show Summary", type="primary", use_container_width=True)
-
+    # Submit & storage
     st.divider()
-    st.markdown("#### Summary")
-    st.caption("Review and download your inputs as JSON.")
-    st.json(st.session_state["data"])
-    download_json_button(st.session_state["data"])
+    st.markdown("#### Submit & Save")
+    st.caption("Click submit to append your response to a Google Sheet and optionally download the JSON.")
+
+    c1, c2, c3 = st.columns([1,1,1])
+    with c1:
+        st.button("⬅️ Back", use_container_width=True, on_click=prev_step)
+    with c2:
+        submit_clicked = st.button("💾 Submit & Save to Google Sheets", type="primary", use_container_width=True)
+    with c3:
+        download_json_button(st.session_state["data"])
+
+    if submit_clicked:
+        st.session_state["submitted"] = True
+        ok, err = append_to_sheet(st.session_state["data"])
+        st.session_state["saved"] = ok
+        st.session_state["save_error"] = err
+        if ok:
+            link = sheet_link()
+            st.success("✅ Saved to Google Sheets.")
+            if link:
+                st.markdown(f"Open your responses here: {link}")
+        else:
+            st.error(f"❌ Save failed: {err}")
 
     st.markdown("---")
-    st.caption("Tip: Use the sidebar to upload a previous JSON and continue editing.")
+    st.markdown("#### Live Preview of Submission JSON")
+    st.json(st.session_state["data"])
 
-# ---------- Footer ----------
+# Footer
 st.markdown("")
 st.caption("Made with ❤️ for fast BMS scoping.")
+
 
